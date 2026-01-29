@@ -1,2 +1,4 @@
 .vscode
 venv/
+runs/
+yolov8n.pt
