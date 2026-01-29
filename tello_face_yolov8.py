@@ -2,52 +2,49 @@ import cv2
 from djitellopy import Tello
 from ultralytics import YOLO
 import time
-import math
 
 # --- 설정 파트 ---
-w, h = 480, 360  # 추론 속도와 화질의 타협점
-pid = [0.4, 0.4, 0]  # P, I, D 게인
-pError = 0  # 이전 오차
+w, h = 480, 360
+# PID 게인 [Yaw, Up/Down, Forward/Back(Distance)]
+# 거리 제어용 Kp(0.002)는 아래 함수 내에서 하드코딩하거나 별도 변수로 관리
+pid_yaw = [0.4, 0.4, 0]
+pid_ud = [0.4, 0.4, 0]
 
-# YOLO 모델 로드 (최초 실행 시 자동 다운로드)
-# 'n'은 nano 버전으로 가장 빠릅니다.
+# P 제어 목표값 (Setpoint)
+target_area = 45000  # 드론이 유지하려는 사람 크기 (거리)
+
 print("YOLO 모델 로딩 중...")
-model = YOLO('yolov8n.pt') 
+model = YOLO('yolov8n.pt')
 print("모델 로드 완료!")
 
-# 드론 연결
 me = Tello()
 me.connect()
 print(f"배터리 잔량: {me.get_battery()}%")
 
 me.streamon()
 me.takeoff()
-me.send_rc_control(0, 0, 20, 0) # 눈높이 상승
-time.sleep(2.0)
+# 초기 상승 속도를 40 -> 25로 낮추고, 대기 시간도 줄여서 안전 확보
+me.send_rc_control(0, 0, 25, 0)
+time.sleep(1.5)
 
 def findPerson(img):
-    # YOLO 추론 (classes=0은 'Person' 클래스만 검출)
-    results = model(img, stream=True, classes=0, verbose=False, conf=0.7)
+    # conf=0.65 유지
+    results = model(img, stream=True, classes=0, verbose=False, conf=0.65)
     
     personListC = []
     personListArea = []
     
-    # 결과 파싱
     for r in results:
         boxes = r.boxes
         for box in boxes:
-            # 바운딩 박스 좌표
             x1, y1, x2, y2 = box.xyxy[0]
             x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
-            
-            # 중심점 및 면적 계산
             w_box = x2 - x1
             h_box = y2 - y1
             cx = x1 + w_box // 2
             cy = y1 + h_box // 2
             area = w_box * h_box
             
-            # 시각화
             cv2.rectangle(img, (x1, y1), (x2, y2), (255, 0, 255), 2)
             cv2.circle(img, (cx, cy), 5, (0, 255, 0), cv2.FILLED)
             
@@ -55,53 +52,68 @@ def findPerson(img):
             personListArea.append(area)
             
     if len(personListArea) != 0:
-        # 가장 큰(가까운) 사람 선택
         i = personListArea.index(max(personListArea))
         return img, [personListC[i], personListArea[i]]
     else:
         return img, [[0, 0], 0]
 
-def trackPerson(info, w, pid, pError):
+def trackPerson(info, w, h, pid_yaw, pid_ud):
     area = info[1]
     x, y = info[0]
-    fb = 0
     
-    # 1. Yaw (회전) 제어
-    error = x - w // 2
-    speed = pid[0] * error + pid[1] * (error - pError)
-    speed = int(max(-100, min(speed, 100))) 
+    # [안전 장치] 사람을 못 찾았으면(x=0) 모든 계산 중단 및 정지
+    if x == 0:
+        me.send_rc_control(0, 0, 0, 0)
+        return 0 # Error 0 리턴
     
-    # 2. Pitch (거리) 제어
-    # YOLO는 전신을 잡으므로 면적 기준을 조금 더 크게 잡습니다
-    # area 값은 테스트하면서 조절 필요 (현재: 15000 ~ 25000 기준)
-    if x == 0: # 사람을 놓치면
-        speed = 0
-        error = 0
-        fb = 0
-    else:
-        # 사람이 너무 가까우면 (면적이 40,000 초과) -> 후진
-        if area > 40000:
-            fb = -20 
-        # 사람이 적당한 거리에 있으면 (30,000 ~ 40,000) -> 정지
-        elif area > 30000 and area < 40000:
-            fb = 0
-        # 사람이 멀면 (면적이 30,000 미만) -> 전진
-        elif area < 30000:
-            fb = 20
-        
-    me.send_rc_control(0, fb, 0, speed)
-    return error
+    # 1. Yaw (회전) P 제어
+    error_x = x - w // 2
+    speed_yaw = pid_yaw[0] * error_x
+    speed_yaw = int(max(-100, min(speed_yaw, 100))) 
+
+    # 2. Up/Down (고도) P 제어
+    # 사람이 없으면(x=0) 위에서 이미 리턴했으므로, 여기선 y=0일 걱정 없음
+    error_y = (h // 2) - y
+    speed_ud = pid_ud[0] * error_y
+    speed_ud = int(max(-100, min(speed_ud, 100)))
+
+    # 3. Distance (거리) P 제어 - 핵심 수정 부분!
+    # Error = 목표 면적 - 현재 면적
+    # 예: 목표(45000) - 현재(20000, 멂) = +25000 -> 전진 필요 (속도 양수)
+    # 예: 목표(45000) - 현재(60000, 가깝) = -15000 -> 후진 필요 (속도 음수)
+    error_dist = target_area - area
+    
+    # Kp 게인: 0.002 (면적 단위가 크므로 아주 작은 값 사용)
+    # 25000 * 0.002 = 50 (속도)
+    kp_dist = 0.002 
+    speed_fb = kp_dist * error_dist
+    speed_fb = int(max(-100, min(speed_fb, 100)))
+    
+    # [Deadzone 설정] 미세한 떨림 방지를 위해 속도가 작으면 0으로 무시
+    if abs(speed_fb) < 5: speed_fb = 0
+    if abs(speed_ud) < 5: speed_ud = 0
+    if abs(speed_yaw) < 5: speed_yaw = 0
+
+    # 최종 명령 전송
+    me.send_rc_control(0, speed_fb, speed_ud, speed_yaw)
+    
+    # 디버깅을 위해 거리 오차 리턴
+    return error_dist
 
 # 메인 루프
 while True:
     img = me.get_frame_read().frame
-    # YOLO 성능 최적화를 위해 이미지 리사이즈
     img = cv2.resize(img, (w, h))
     
     img, info = findPerson(img)
-    pError = trackPerson(info, w, pid, pError)
     
-    cv2.imshow("YOLO Tello Tracking", img)
+    dist_err = trackPerson(info, w, h, pid_yaw, pid_ud)
+    
+    # 화면 정보 표시
+    cv2.putText(img, f"Area: {info[1]}", (10, 30), cv2.FONT_HERSHEY_PLAIN, 1.5, (0, 255, 0), 2)
+    cv2.putText(img, f"DistErr: {dist_err}", (10, 60), cv2.FONT_HERSHEY_PLAIN, 1.5, (0, 255, 0), 2)
+
+    cv2.imshow("Final P-Control Tracking", img)
     
     if cv2.waitKey(1) & 0xFF == ord('q'):
         me.land()
