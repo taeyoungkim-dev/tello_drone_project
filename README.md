@@ -11,35 +11,56 @@
 * **하드웨어 제약:** DJI Tello는 고가의 센서(LiDAR, Stereo Camera)가 없고, 단안 카메라만으로는 거리(Depth) 측정과 절대 위치 파악이 어려움.
 * **기존의 한계:** 순수 Visual SLAM은 스케일 모호성(Scale Ambiguity)과 누적 오차(Drift) 문제로 인해 장시간 안정적인 자율 비행이 어려움.
 
-### 1.2 목표
+### 1.2 목표 (최종)
 * **ArUco 마커(Fiducial Markers)**를 실내 공간의 랜드마크로 활용하여 드론의 **절대 위치(Absolute Pose)를 보정**하고 스케일 문제를 해결.
 * **Producer-Consumer 아키텍처**를 도입하여 영상 처리 지연(Latency)을 최소화하고, 부드러운 **연속 PID 제어**를 통해 자율적으로 마커를 탐색하며 **3D 경로 및 희소 지도(Sparse Map)**를 작성.
+
+### 1.3 개발 단계 (Phased Approach)
+프로젝트는 단계적으로 접근하여 각 핵심 기술을 검증한 후 최종 목표로 통합합니다:
+
+* **Phase 1 (완료):** 이미지 기반 객체 추적 시스템 구축
+  - OpenCV Haar Cascade 및 YOLOv8을 활용한 실시간 객체 추적 구현
+  - 기본 PID 제어 로직 및 드론 제어 인터페이스 검증
+  - **핵심 발견:** WiFi 통신 지연 및 AI 처리 시간으로 인한 프레임 지연 문제 인식
+
+* **Phase 2 (완료):** Producer-Consumer 패턴 적용 및 성능 최적화
+  - 멀티스레드 아키텍처로 영상 수신과 처리 분리
+  - 프레임 지연 60-90% 감소 (측정 완료)
+  - 성능 측정 및 로깅 시스템 구축
+
+* **Phase 3 (진행 예정):** ArUco 마커 기반 SLAM 구현
+  - Phase 1-2에서 검증된 아키텍처를 기반으로 ArUco 마커 검출 통합
+  - 절대 좌표 기반 위치 추정 및 지도 작성
+  - 자율 주행 및 탐색 알고리즘 구현
 
 ---
 
 ## 2. 핵심 기술 및 아키텍처 (Key Technologies & Architecture)
-### 2.1 시스템 아키텍처 (Performance)
+### 2.1 시스템 아키텍처 (Performance) ✅ 구현 완료
 * **Producer-Consumer 패턴 적용:**
     * **영상 수신(Producer):** 별도 스레드에서 프레임을 수신하고 `queue(maxsize=1)`을 유지하여 최신 프레임만 보장 (Latency 최소화).
     * **메인 로직(Consumer):** AI/CV 연산 속도와 무관하게 항상 최신 프레임을 처리하여 제어 반응성 확보.
+    * **검증 결과:** Phase 2에서 프레임 지연 60-90% 감소 확인 (OpenCV/YOLOv8 테스트베드)
 * **비동기 로깅 (Asynchronous Logging):**
     * 디스크 I/O로 인한 메인 루프 블로킹(Blocking)을 방지하기 위해 별도의 LogWriter 스레드 운용.
+    * 시간 기반 flush(1초 간격)로 성능 영향 최소화
 
-### 2.2 제어 및 내비게이션 (Navigation)
+### 2.2 제어 및 내비게이션 (Navigation) 🚧 Phase 3 예정
 * **Greedy Visual Servoing:**
     * 사전 경로 계획(Planning) 없이, 현재 시야에 보이는 새로운 마커를 향해 이동하는 탐험 로직 적용.
     * "마커 발견 → 접근 → 완료 처리 → 회전하여 다음 마커 탐색"의 상태 머신(FSM) 구조.
 * **Continuous Smooth Pursuit:**
     * 가다 서다(Stop & Go) 방식을 폐기하고, 마커와의 거리에 따라 속도를 가변적으로 조절하는 연속 PID 제어 적용 (Motion Blur 최소화).
+    * **기초 검증:** Phase 1-2에서 P/PID 제어 기본 구조 검증 완료
 
-### 2.3 매핑 및 위치 추정 (SLAM & Mapping)
+### 2.3 매핑 및 위치 추정 (SLAM & Mapping) 🚧 Phase 3 예정
 * **Marker-based Pose Estimation:**
     * ArUco 마커의 실제 크기 정보를 이용하여 카메라와 마커 사이의 정확한 3차원 거리 및 자세(Pose) 산출.
     * 이를 Ground Truth로 삼아 드론의 이동 궤적(Trajectory) 보정.
 * **Sparse Point Cloud Mapping:**
     * 마커의 위치를 노드(Node)로 하는 위상 지도(Topological Map)와 ORB 특징점을 융합한 희소 지도 작성.
 
-### 2.4 멀티 마커 처리 및 지도 확장 전략 (Multi-Marker Handling Strategy)
+### 2.4 멀티 마커 처리 및 지도 확장 전략 (Multi-Marker Handling Strategy) 🚧 Phase 3 예정
 드론의 시야(FOV) 내에 다수의 마커가 동시에 감지될 경우, **"Anchor-based SLAM"** 알고리즘을 통해 위치 보정(Localization)과 지도 작성(Mapping)을 동시에 수행함.
 
 * **Anchor 선정 규칙 (Priority):**
@@ -84,7 +105,12 @@
 
 ## 5. 개발 일지 (Development Log)
 
-### 2026-02-02: 성능 최적화 및 측정 시스템 구축
+### 2026-02-02: Phase 2 완료 - Producer-Consumer 패턴 적용 및 성능 최적화
+
+> **개발 배경:**  
+> ArUco 마커 기반 SLAM 구현 전, 실시간 영상 처리 및 드론 제어 시스템의 성능 병목을 파악하고 해결하기 위해 OpenCV(얼굴 추적) 및 YOLOv8(사람 추적)을 테스트베드로 활용.  
+> WiFi 스트리밍 지연과 AI 추론 시간으로 인한 프레임 지연 문제를 발견하였고, **Producer-Consumer 패턴**을 적용하여 해결.  
+> 이 최적화된 아키텍처는 향후 ArUco SLAM 구현의 기반이 될 예정.
 
 #### 📊 성능 측정 기능 추가
 - **FPS 측정**: 실시간 루프 처리 속도 측정 기능 구현
@@ -135,3 +161,12 @@
 - 프레임 지연 60-90% 감소 확인 가능 (실측)
 - 안전한 드론 운용 (모델 로드 실패 시 이륙 방지)
 - 성능 비교 결과 시각화 자동화
+
+#### 🎯 다음 단계 (Phase 3)
+**검증된 시스템 아키텍처를 기반으로 ArUco 마커 SLAM 구현:**
+1. OpenCV의 `cv2.aruco` 모듈로 객체 검출 로직 교체
+2. `solvePnP`를 활용한 3D Pose Estimation 추가
+3. 다중 마커 동시 처리 및 지도 데이터베이스 구축
+4. 자율 탐색 알고리즘 및 경로 계획 구현
+
+---
