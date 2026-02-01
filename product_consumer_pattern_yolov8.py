@@ -2,13 +2,14 @@ import cv2
 from djitellopy import Tello
 from ultralytics import YOLO
 import time
+import threading
+import queue
+import numpy as np
 # ==========================================
 # [로깅 기능 추가] CSV 로그 저장용 임포트
 # ==========================================
 import csv
 import datetime
-import threading
-import queue
 from pathlib import Path
 
 # ==========================================
@@ -64,15 +65,60 @@ class LogWriter(threading.Thread):
         """로그 스레드 종료"""
         self.running = False
 
-# --- 설정 파트 ---
+# ==========================================
+# [CS 핵심] 영상 수신 전용 쓰레드 (Producer)
+# ==========================================
+class FrameReceiver(threading.Thread):
+    def __init__(self, tello, width, height):
+        threading.Thread.__init__(self)
+        self.tello = tello
+        self.width = width
+        self.height = height
+        self.daemon = True 
+        self.running = True
+        
+        # ★ YOLO는 느리기 때문에 큐 관리가 더 중요합니다.
+        #    추론이 끝났을 때 무조건 '방금 찍은' 사진이 있어야 합니다.
+        self.frame_queue = queue.Queue(maxsize=1) 
+
+    def run(self):
+        stream_reader = self.tello.get_frame_read()
+        while self.running:
+            frame = stream_reader.frame
+            if frame is None:
+                continue
+
+            # 전처리(Resize)를 스레드에서 수행
+            frame = cv2.resize(frame, (self.width, self.height))
+
+            # ==========================================
+            # [성능 측정 추가] 프레임에 타임스탬프 추가
+            # ==========================================
+            frame_timestamp = time.time()
+            
+            # 큐 최신화 (오래된 프레임 Drop)
+            if not self.frame_queue.empty():
+                try:
+                    self.frame_queue.get_nowait()
+                except queue.Empty:
+                    pass
+            
+            # [성능 측정 추가] 프레임과 타임스탬프를 함께 큐에 넣기
+            self.frame_queue.put((frame, frame_timestamp))
+            # ==========================================
+            time.sleep(0.01)
+
+    def stop(self):
+        self.running = False
+
+# ==========================================
+# 1. 설정 및 초기화
+# ==========================================
 w, h = 480, 360
-# PID 게인 [Yaw, Up/Down, Forward/Back(Distance)]
-# 거리 제어용 Kp(0.002)는 아래 함수 내에서 하드코딩하거나 별도 변수로 관리
+# PID 게인 [Yaw, Up/Down, Forward/Back]
 pid_yaw = [0.4, 0.4, 0]
 pid_ud = [0.4, 0.4, 0]
-
-# P 제어 목표값 (Setpoint)
-target_area = 45000  # 드론이 유지하려는 사람 크기 (거리)
+target_area = 45000 
 
 # ==========================================
 # [안전성 개선] 이륙 전 모델 로드 및 검증
@@ -107,11 +153,19 @@ print(f"배터리 잔량: {me.get_battery()}%")
 
 me.streamon()
 
-print("\n⚠️  주의: 3초 뒤 자동으로 이륙합니다!")
+# ★ 스레드 시작 (이륙 전에 영상 수신 시작)
+receiver = FrameReceiver(me, w, h)
+receiver.start()
+
+# 영상이 들어올 때까지 대기
+while receiver.frame_queue.empty():
+    time.sleep(0.1)
+    print("영상 수신 대기 중...")
+
+print("\n이륙 준비 완료! 3초 뒤 이륙합니다.")
 time.sleep(3)
 
 me.takeoff()
-# 초기 상승 속도를 40 -> 25로 낮추고, 대기 시간도 줄여서 안전 확보
 me.send_rc_control(0, 0, 25, 0)
 time.sleep(1.5)
 
@@ -128,20 +182,24 @@ LOG_DIR = Path("logs")
 LOG_DIR.mkdir(exist_ok=True)
 
 now = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-log_filename = LOG_DIR / f"flight_log_yolov8_{now}.csv"
+log_filename = LOG_DIR / f"flight_log_yolov8_optimized_{now}.csv"
 logger = LogWriter(str(log_filename), flush_interval_sec=1.0)
 logger.start()
 print(f"📝 로그 파일 생성: {log_filename}")
 
 frame_count = 0  # 프레임 카운터
 
+# ==========================================
+# 2. 함수 정의
+# ==========================================
 def findPerson(img):
-    # conf=0.65 유지
+    # stream=True 옵션 사용 (메모리 효율화)
     results = model(img, stream=True, classes=0, verbose=False, conf=0.65)
     
     personListC = []
     personListArea = []
     
+    # YOLO 결과 파싱
     for r in results:
         boxes = r.boxes
         for box in boxes:
@@ -169,68 +227,71 @@ def trackPerson(info, w, h, pid_yaw, pid_ud):
     area = info[1]
     x, y = info[0]
     
-    # [안전 장치] 사람을 못 찾았으면(x=0) 모든 계산 중단 및 정지
     if x == 0:
         me.send_rc_control(0, 0, 0, 0)
-        return 0 # Error 0 리턴
+        return 0 
     
-    # 1. Yaw (회전) P 제어
+    # 1. Yaw 제어
     error_x = x - w // 2
     speed_yaw = pid_yaw[0] * error_x
     speed_yaw = int(max(-100, min(speed_yaw, 100))) 
 
-    # 2. Up/Down (고도) P 제어
-    # 사람이 없으면(x=0) 위에서 이미 리턴했으므로, 여기선 y=0일 걱정 없음
+    # 2. Up/Down 제어
     error_y = (h // 2) - y
     speed_ud = pid_ud[0] * error_y
     speed_ud = int(max(-100, min(speed_ud, 100)))
 
-    # 3. Distance (거리) P 제어 - 핵심 수정 부분!
-    # Error = 목표 면적 - 현재 면적
-    # 예: 목표(45000) - 현재(20000, 멂) = +25000 -> 전진 필요 (속도 양수)
-    # 예: 목표(45000) - 현재(60000, 가깝) = -15000 -> 후진 필요 (속도 음수)
+    # 3. Distance 제어
     error_dist = target_area - area
-    
-    # Kp 게인: 0.002 (면적 단위가 크므로 아주 작은 값 사용)
-    # 25000 * 0.002 = 50 (속도)
     kp_dist = 0.002 
     speed_fb = kp_dist * error_dist
     speed_fb = int(max(-100, min(speed_fb, 100)))
     
-    # [Deadzone 설정] 미세한 떨림 방지를 위해 속도가 작으면 0으로 무시
+    # Deadzone
     if abs(speed_fb) < 5: speed_fb = 0
     if abs(speed_ud) < 5: speed_ud = 0
     if abs(speed_yaw) < 5: speed_yaw = 0
 
-    # 최종 명령 전송
     me.send_rc_control(0, speed_fb, speed_ud, speed_yaw)
-    
-    # 디버깅을 위해 거리 오차 리턴
     return error_dist
 
-# 메인 루프
+# ==========================================
+# 3. 메인 루프 (Consumer)
+# ==========================================
 try:
     while True:
-        img = me.get_frame_read().frame
-        img = cv2.resize(img, (w, h))
+        # ★ [핵심] YOLO가 아무리 느려도, 여기서 get() 하는 순간
+        #    스레드가 넣어둔 0.01초 전 '최신 영상'을 가져옴.
+        #    즉, '추론 시간'은 걸리지만 '데이터 지연'은 사라짐.
+        try:
+            # ==========================================
+            # [성능 측정 추가] 프레임과 타임스탬프를 함께 받기
+            # ==========================================
+            img, frame_timestamp = receiver.frame_queue.get(timeout=1.0)
+        except queue.Empty:
+            continue
         
+        # YOLO 추론 & 제어
         img, info = findPerson(img)
-        
         dist_err = trackPerson(info, w, h, pid_yaw, pid_ud)
         
-        # 화면 정보 표시
         cv2.putText(img, f"Area: {info[1]}", (10, 30), cv2.FONT_HERSHEY_PLAIN, 1.5, (0, 255, 0), 2)
         cv2.putText(img, f"DistErr: {dist_err}", (10, 60), cv2.FONT_HERSHEY_PLAIN, 1.5, (0, 255, 0), 2)
         
         # ==========================================
-        # [성능 측정 추가] FPS 계산 및 화면 표시
+        # [성능 측정 추가] FPS 및 Frame Latency 계산
         # ==========================================
         cTime = time.time()
         fps = 1 / (cTime - pTime) if (cTime - pTime) > 0 else 0
         pTime = cTime
         
-        # FPS 화면 표시 (빨간색, 크게)
-        cv2.putText(img, f"Loop FPS: {int(fps)}", (10, h - 40), 
+        # Frame Latency 계산 (ms 단위)
+        frame_latency = (cTime - frame_timestamp) * 1000
+        
+        # 화면에 성능 지표 표시
+        cv2.putText(img, f"Loop FPS: {int(fps)}", (10, h - 70), 
+                    cv2.FONT_HERSHEY_PLAIN, 2, (0, 255, 0), 2)
+        cv2.putText(img, f"Frame Age: {int(frame_latency)}ms", (10, h - 40), 
                     cv2.FONT_HERSHEY_PLAIN, 2, (0, 0, 255), 2)
         # ==========================================
         
@@ -238,21 +299,22 @@ try:
         # [로깅 기능 추가] 성능 데이터 로그 저장
         # ==========================================
         frame_count += 1
-        # Frame Latency는 최적화 전 버전이므로 측정 불가 (0으로 기록)
-        logger.log([frame_count, cTime, 0, fps])
+        logger.log([frame_count, cTime, frame_latency, fps])
         # ==========================================
 
-        cv2.imshow("Final P-Control Tracking", img)
+        cv2.imshow("YOLOv8 Optimization Tracking", img)
         
         if cv2.waitKey(1) & 0xFF == ord('q'):
             me.land()
             break
 
 except KeyboardInterrupt:
-    print("\n키보드 인터럽트 감지")
     me.land()
 
 finally:
+    receiver.stop()
+    receiver.join()
+    
     # ==========================================
     # [로깅 기능 추가] 로그 스레드 종료 및 파일 저장
     # ==========================================
@@ -261,5 +323,6 @@ finally:
     print(f"✅ 로그 저장 완료: {log_filename} (총 {frame_count}개 프레임)")
     # ==========================================
     
+    me.streamoff()
     cv2.destroyAllWindows()
-    print("프로그램 종료")
+    print("종료되었습니다.")

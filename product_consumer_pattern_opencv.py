@@ -1,13 +1,14 @@
 import cv2
 from djitellopy import Tello
 import time
+import threading
+import queue
+import numpy as np
 # ==========================================
 # [로깅 기능 추가] CSV 로그 저장용 임포트
 # ==========================================
 import csv
 import datetime
-import threading
-import queue
 from pathlib import Path
 
 # ==========================================
@@ -63,11 +64,57 @@ class LogWriter(threading.Thread):
         """로그 스레드 종료"""
         self.running = False
 
-# --- 설정 파트 ---
-w, h = 360, 240  # 연산 속도를 위해 이미지 크기 축소
-pid = [0.4, 0.4, 0]  # P, I, D 게인 (여기선 P만 사용: 0.4)
-pError = 0  # 이전 오차 (D제어용, 현재는 사용 안 함)
-startCounter = 0  # 이륙 전 대기 카운터
+# ==========================================
+# [CS 핵심] 영상 수신 전용 쓰레드 (Producer)
+# ==========================================
+class FrameReceiver(threading.Thread):
+    def __init__(self, tello, width, height):
+        threading.Thread.__init__(self)
+        self.tello = tello
+        self.width = width
+        self.height = height
+        self.daemon = True 
+        self.running = True
+        
+        # ★ 가장 중요한 부분: 큐 크기를 1로 제한
+        self.frame_queue = queue.Queue(maxsize=1) 
+
+    def run(self):
+        stream_reader = self.tello.get_frame_read()
+        while self.running:
+            frame = stream_reader.frame
+            if frame is None:
+                continue
+
+            # 전처리(Resize)를 여기서 수행해 메인 스레드 부담 경감
+            frame = cv2.resize(frame, (self.width, self.height))
+
+            # ==========================================
+            # [성능 측정 추가] 프레임에 타임스탬프 추가
+            # ==========================================
+            frame_timestamp = time.time()
+            
+            # 큐가 꽉 찼으면(1개 있으면) 옛날 거 버리고 새거 넣기
+            if not self.frame_queue.empty():
+                try:
+                    self.frame_queue.get_nowait()
+                except queue.Empty:
+                    pass
+            
+            # [성능 측정 추가] 프레임과 타임스탬프를 함께 큐에 넣기
+            self.frame_queue.put((frame, frame_timestamp))
+            # ==========================================
+            time.sleep(0.01) # CPU 점유율 조절
+
+    def stop(self):
+        self.running = False
+
+# ==========================================
+# 1. 설정 및 초기화
+# ==========================================
+w, h = 360, 240
+pid = [0.4, 0.4, 0]
+pError = 0
 
 # ==========================================
 # [안전성 개선] 이륙 전 모델 로드 및 검증
@@ -93,20 +140,28 @@ except Exception as e:
     exit(1)
 # ==========================================
 
-# 드론 연결 및 초기화
-print("\n드론 연결 중...")
+print("\n드론 연결 및 초기화 중...")
 me = Tello()
 me.connect()
 print(f"배터리 잔량: {me.get_battery()}%")
 
-me.streamon() # 비디오 스트림 시작
+me.streamon()
 
-print("\n⚠️  주의: 3초 뒤 자동으로 이륙합니다!")
-time.sleep(3)
+# ★ 스레드 시작 (이륙 전에 미리 영상 받아오기 시작)
+receiver = FrameReceiver(me, w, h)
+receiver.start()
 
-me.takeoff()  # !!! 주의: 코드 실행 시 바로 이륙합니다 !!!
-me.send_rc_control(0, 0, 25, 0) # 처음엔 눈높이까지 살짝 상승
-time.sleep(2.2) # 상승 대기
+# 영상이 들어올 때까지 잠시 대기 (안전장치)
+while receiver.frame_queue.empty():
+    time.sleep(0.1)
+    print("영상 수신 대기 중...")
+
+print("\n이륙 준비 완료! 3초 뒤 이륙합니다.")
+time.sleep(3) 
+
+me.takeoff()
+me.send_rc_control(0, 0, 25, 0) # 눈높이 상승
+time.sleep(2.2)
 
 # ==========================================
 # [성능 측정 추가] FPS 계산용 변수
@@ -121,13 +176,16 @@ LOG_DIR = Path("logs")
 LOG_DIR.mkdir(exist_ok=True)
 
 now = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-log_filename = LOG_DIR / f"flight_log_opencv_{now}.csv"
+log_filename = LOG_DIR / f"flight_log_opencv_optimized_{now}.csv"
 logger = LogWriter(str(log_filename), flush_interval_sec=1.0)
 logger.start()
 print(f"📝 로그 파일 생성: {log_filename}")
 
 frame_count = 0  # 프레임 카운터
 
+# ==========================================
+# 2. 함수 정의 (기존 로직 유지)
+# ==========================================
 def findFace(img):
     faceList = []
     myFaceListC = []
@@ -137,14 +195,10 @@ def findFace(img):
     faces = face_cascade.detectMultiScale(gray, 1.1, 4)
     
     for (x, y, w_box, h_box) in faces:
-        # 얼굴에 사각형 그리기
         cv2.rectangle(img, (x, y), (x + w_box, y + h_box), (0, 0, 255), 2)
-        
-        # 얼굴 중심점(cx, cy) 계산
         cx = x + w_box // 2
         cy = y + h_box // 2
         area = w_box * h_box
-        
         cv2.circle(img, (cx, cy), 5, (0, 255, 0), cv2.FILLED)
         
         myFaceListC.append([cx, cy])
@@ -152,7 +206,6 @@ def findFace(img):
         faceList.append([x, y, w_box, h_box])
     
     if len(myFaceListArea) != 0:
-        # 가장 가까운(영역이 가장 큰) 얼굴 하나만 추적
         i = myFaceListArea.index(max(myFaceListArea))
         return img, [myFaceListC[i], myFaceListArea[i]]
     else:
@@ -161,60 +214,64 @@ def findFace(img):
 def trackFace(info, w, pid, pError):
     area = info[1]
     x, y = info[0]
-    fb = 0 # Forward/Backward Speed
+    fb = 0
     
-    # 1. Yaw 제어 (회전)
-    # 화면 중심(w//2)과 얼굴 중심(x)의 오차 계산
     error = x - w // 2
-    # P 제어: 오차 * 게인 -> 속도 결정 (값 클램핑 -100~100)
     speed = pid[0] * error + pid[1] * (error - pError)
     speed = int(max(-100, min(speed, 100))) 
     
-    # 얼굴이 감지되지 않았으면(x=0) 회전 멈춤
     if x == 0:
         speed = 0
         error = 0
     
-    # 2. Pitch 제어 (거리 유지)
-    # 얼굴 영역(area)이 일정 범위(6000~10000) 내에 들어오도록 제어
-    # 너무 가까우면(>10000) 후진, 멀면(<6000) 전진
     if area > 6000 and area < 10000:
         fb = 0
     elif area > 10000:
-        fb = -20 # 후진
+        fb = -20
     elif area < 6000 and area != 0:
-        fb = 20  # 전진
+        fb = 20
     
-    # 얼굴 없으면 제자리 정지
     if x == 0:
         fb = 0
         error = 0
         
-    # 드론에 명령 전송 (좌우이동, 전후이동, 상하이동, 회전)
     me.send_rc_control(0, fb, 0, speed)
     return error
 
-# 메인 루프
+# ==========================================
+# 3. 메인 루프 (Consumer)
+# ==========================================
 try:
     while True:
-        img = me.get_frame_read().frame
-        img = cv2.resize(img, (w, h))
-        
-        # 얼굴 찾기
+        # ★ [핵심 변경] 드론한테 직접 달라고 안 하고, 큐에서 '가장 최신'꺼 꺼내옴
+        # 메인 루프가 얼굴 인식하느라 0.1초 늦어져도, 
+        # receiver가 이미 0.01초 전 사진을 큐에 넣어뒀음.
+        try:
+            # ==========================================
+            # [성능 측정 추가] 프레임과 타임스탬프를 함께 받기
+            # ==========================================
+            img, frame_timestamp = receiver.frame_queue.get(timeout=1.0)
+        except queue.Empty:
+            continue
+
+        # 얼굴 찾기 & 제어 (로직 동일)
         img, info = findFace(img)
-        
-        # 트래킹 제어
         pError = trackFace(info, w, pid, pError)
         
         # ==========================================
-        # [성능 측정 추가] FPS 계산 및 화면 표시
+        # [성능 측정 추가] FPS 및 Frame Latency 계산
         # ==========================================
         cTime = time.time()
         fps = 1 / (cTime - pTime) if (cTime - pTime) > 0 else 0
         pTime = cTime
         
-        # FPS 화면 표시 (빨간색, 크게)
-        cv2.putText(img, f"Loop FPS: {int(fps)}", (10, h - 40), 
+        # Frame Latency 계산 (ms 단위)
+        frame_latency = (cTime - frame_timestamp) * 1000
+        
+        # 화면에 성능 지표 표시
+        cv2.putText(img, f"Loop FPS: {int(fps)}", (10, h - 70), 
+                    cv2.FONT_HERSHEY_PLAIN, 2, (0, 255, 0), 2)
+        cv2.putText(img, f"Frame Age: {int(frame_latency)}ms", (10, h - 40), 
                     cv2.FONT_HERSHEY_PLAIN, 2, (0, 0, 255), 2)
         # ==========================================
         
@@ -222,22 +279,22 @@ try:
         # [로깅 기능 추가] 성능 데이터 로그 저장
         # ==========================================
         frame_count += 1
-        # Frame Latency는 최적화 전 버전이므로 측정 불가 (0으로 기록)
-        logger.log([frame_count, cTime, 0, fps])
+        logger.log([frame_count, cTime, frame_latency, fps])
         # ==========================================
         
-        cv2.imshow("Tello Face Tracking", img)
+        cv2.imshow("Tello Face Tracking (Optimized)", img)
         
-        # 'q' 키를 누르면 착륙 후 종료
         if cv2.waitKey(1) & 0xFF == ord('q'):
             me.land()
             break
 
 except KeyboardInterrupt:
-    print("\n키보드 인터럽트 감지")
     me.land()
 
 finally:
+    receiver.stop() # 스레드 종료
+    receiver.join()
+    
     # ==========================================
     # [로깅 기능 추가] 로그 스레드 종료 및 파일 저장
     # ==========================================
@@ -246,5 +303,6 @@ finally:
     print(f"✅ 로그 저장 완료: {log_filename} (총 {frame_count}개 프레임)")
     # ==========================================
     
+    me.streamoff()
     cv2.destroyAllWindows()
-    print("프로그램 종료")
+    print("종료되었습니다.")

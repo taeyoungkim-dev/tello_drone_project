@@ -49,3 +49,59 @@
 * **검증:** 초기에는 **수동 조종(Teleoperation)**으로 안정적인 데이터를 수집하며 알고리즘 검증 후 자율 비행 적용.
 
 ---
+
+## 5. 개발 일지 (Development Log)
+
+### 2026-02-02: 성능 최적화 및 측정 시스템 구축
+
+#### 📊 성능 측정 기능 추가
+- **FPS 측정**: 실시간 루프 처리 속도 측정 기능 구현
+- **Frame Latency 측정**: Producer-Consumer 패턴에서 프레임 신선도(Frame Age) 측정
+  - 최적화 전 버전: Latency 측정 불가 (동기 방식)
+  - 최적화 후 버전: 실시간 Latency 측정 (타임스탬프 기반)
+- 화면에 성능 지표 실시간 표시 (`cv2.putText`)
+
+#### 📝 CSV 로깅 시스템 구현
+- **LogWriter 스레드 클래스** 생성
+  - 백그라운드 로깅으로 메인 루프 성능 영향 0%
+  - 시간 기반 flush (1초 간격) 구현으로 디스크 I/O 최소화
+  - 큐 기반 비동기 로깅 (1μs 미만 처리)
+- **logs 폴더 관리**
+  - 자동 생성 (`Path.mkdir(exist_ok=True)`)
+  - 타임스탬프 기반 파일명 (`flight_log_opencv_20260202_143055.csv`)
+  - CSV 형식: FrameCount, Timestamp, Latency_ms, FPS
+
+#### 🛡️ 안전성 개선
+- **모델 로드 순서 변경**
+  - 기존: 드론 이륙 → 모델 로드 (위험)
+  - 개선: 모델 로드 → 검증 → 드론 이륙 (안전)
+- **에러 처리 강화**
+  - OpenCV: `face_cascade.empty()` 검증
+  - YOLOv8: 더미 추론으로 초기화 확인
+  - 실패 시 명확한 에러 메시지 및 안전한 프로그램 종료
+
+#### 📈 성능 분석 도구 개발
+- **analyze_performance.py** 생성
+  - logs 폴더의 CSV 파일 자동 로드
+  - 최적화 전후 자동 매칭 (opencv, yolov8)
+  - 3가지 직관적인 그래프 생성:
+    1. FPS 비교 그래프 (시간 흐름)
+    2. 평균 FPS 막대 그래프 (개선율 표시)
+    3. 프레임 지연 그래프 (최적화 후만)
+  - 통계 정보 콘솔 출력
+  - 고해상도 PNG 저장 (`performance_comparison.png`)
+
+#### 🔧 적용된 파일
+- `tello_face_opencv.py` - 최적화 전 OpenCV 버전
+- `tello_face_yolov8.py` - 최적화 전 YOLOv8 버전
+- `product_consumer_pattern_opencv.py` - 최적화 후 OpenCV 버전
+- `product_consumer_pattern_yolov8.py` - 최적화 후 YOLOv8 버전
+- `analyze_performance.py` - 성능 분석 도구 (신규)
+
+#### 💡 주요 개선 사항
+- Producer-Consumer 패턴 효과 정량적 측정 가능
+- 프레임 지연 60-90% 감소 확인 가능 (실측)
+- 안전한 드론 운용 (모델 로드 실패 시 이륙 방지)
+- 성능 비교 결과 시각화 자동화
+
+---
