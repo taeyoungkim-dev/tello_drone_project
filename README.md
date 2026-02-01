@@ -39,6 +39,24 @@
 * **Sparse Point Cloud Mapping:**
     * 마커의 위치를 노드(Node)로 하는 위상 지도(Topological Map)와 ORB 특징점을 융합한 희소 지도 작성.
 
+### 2.4 멀티 마커 처리 및 지도 확장 전략 (Multi-Marker Handling Strategy)
+드론의 시야(FOV) 내에 다수의 마커가 동시에 감지될 경우, **"Anchor-based SLAM"** 알고리즘을 통해 위치 보정(Localization)과 지도 작성(Mapping)을 동시에 수행함.
+
+* **Anchor 선정 규칙 (Priority):**
+    * 감지된 마커 중 **'이미 지도(Map Database)에 등록된 마커'**를 우선적으로 찾음.
+    * 등록된 마커가 다수일 경우, 카메라 중심에 가장 가깝고 인식 신뢰도가 높은 마커를 **'앵커(Anchor, 기준점)'**로 선정.
+
+* **시나리오별 처리 로직:**
+    1.  **Localization (위치 인식):**
+        * 앵커 마커의 절대 좌표(Global Pose)를 기준으로 드론의 현재 위치를 역산출(Inverse Calculation).
+        * `Drone_Pose = Anchor_Global_Pose - Relative_Distance(tvec)`
+    2.  **Mapping (지도 확장):**
+        * 앵커를 통해 확정된 드론의 위치를 기준으로, 시야에 들어온 **'미등록 마커(Unknown Marker)'**들의 절대 좌표를 계산.
+        * `New_Marker_Pose = Drone_Pose + Relative_Distance(tvec)`
+        * 새롭게 계산된 좌표를 Map Database에 등록하여, 이후 해당 마커도 앵커로 활용 가능하도록 조치.
+    3.  **Conflict Resolution (오차 보정):**
+        * 여러 개의 '등록된 마커'가 동시에 보일 때 위치 값에 충돌이 발생하면, **가장 가까운 마커(Highest Trust)**의 데이터를 신뢰값(Ground Truth)으로 채택하여 누적 오차(Drift)를 최소화.
+
 ---
 
 ## 3. 개발 환경 (Development Environment)
