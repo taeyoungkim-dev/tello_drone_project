@@ -1,52 +1,66 @@
 # tello_drone_project
 
-# Project: Monocular Visual SLAM with Tello
-> **주제:** 저가형 드론의 단안 카메라를 활용한 실내 위치 추정 및 지도 작성  
-> **영문명:** Implementation of Monocular Visual SLAM using a Low-Cost Drone in GPS-denied Environments
+# Project: Marker-based Visual SLAM & Autonomous Navigation with Tello
+> **주제:** ArUco 마커를 활용한 실내 자율주행 및 3D 공간 매핑  
+> **영문명:** Implementation of Marker-based Visual SLAM using a Low-Cost Drone
 
 ---
 
 ## 1. 프로젝트 배경 및 목표 (Background & Objective)
 ### 1.1 배경
-* **하드웨어 제약:** DJI Tello와 같은 보급형 드론은 고가의 LiDAR나 스테레오 카메라(Stereo Camera)가 탑재되어 있지 않아 정밀한 깊이(Depth) 인식이 불가능함.
-* **환경적 제약:** 실내 환경에서는 GPS 수신이 불가능하여, 호버링 및 주행 시 위치 오차(Drift)가 지속적으로 누적됨.
+* **하드웨어 제약:** DJI Tello는 고가의 센서(LiDAR, Stereo Camera)가 없고, 단안 카메라만으로는 거리(Depth) 측정과 절대 위치 파악이 어려움.
+* **기존의 한계:** 순수 Visual SLAM은 스케일 모호성(Scale Ambiguity)과 누적 오차(Drift) 문제로 인해 장시간 안정적인 자율 비행이 어려움.
 
 ### 1.2 목표
-* 드론의 **단안 카메라(Monocular Camera)** 영상 데이터만을 활용하여, 미지의 실내 공간에서 드론의 **3차원 이동 궤적(Trajectory)을 추정**하고 주변 환경의 **희소 지도(Sparse Map)를 작성**하는 Visual SLAM 알고리즘 구현.
+* **ArUco 마커(Fiducial Markers)**를 실내 공간의 랜드마크로 활용하여 드론의 **절대 위치(Absolute Pose)를 보정**하고 스케일 문제를 해결.
+* **Producer-Consumer 아키텍처**를 도입하여 영상 처리 지연(Latency)을 최소화하고, 부드러운 **연속 PID 제어**를 통해 자율적으로 마커를 탐색하며 **3D 경로 및 희소 지도(Sparse Map)**를 작성.
 
 ---
 
-## 2. 핵심 기술 및 원리 (Key Technologies)
-* **특징점 추출 및 매칭 (Feature Extraction & Matching)**
-    * 매 프레임에서 **ORB (Oriented FAST and Rotated BRIEF)** 알고리즘을 사용하여 코너, 에지 등 유의미한 특징점(Keypoints)을 검출하고 프레임 간 추적 수행.
-* **운동 시차를 이용한 깊이 추정 (Depth from Motion Parallax)**
-    * 단안 카메라의 한계를 극복하기 위해 드론의 **병진 운동(Translation)** 시 발생하는 시차를 이용.
-    * **삼각 측량(Triangulation)** 기법을 통해 2차원 이미지 평면의 픽셀 좌표로부터 3차원 공간 좌표를 복원.
-* **자세 추정 (Pose Estimation / Visual Odometry)**
-    * 연속된 프레임 간의 특징점 변화를 기하학적으로 분석하여 드론의 **6-DoF (위치 및 자세)** 변화량을 역추적.
+## 2. 핵심 기술 및 아키텍처 (Key Technologies & Architecture)
+### 2.1 시스템 아키텍처 (Performance)
+* **Producer-Consumer 패턴 적용:**
+    * **영상 수신(Producer):** 별도 스레드에서 프레임을 수신하고 `queue(maxsize=1)`을 유지하여 최신 프레임만 보장 (Latency 최소화).
+    * **메인 로직(Consumer):** AI/CV 연산 속도와 무관하게 항상 최신 프레임을 처리하여 제어 반응성 확보.
+* **비동기 로깅 (Asynchronous Logging):**
+    * 디스크 I/O로 인한 메인 루프 블로킹(Blocking)을 방지하기 위해 별도의 LogWriter 스레드 운용.
+
+### 2.2 제어 및 내비게이션 (Navigation)
+* **Greedy Visual Servoing:**
+    * 사전 경로 계획(Planning) 없이, 현재 시야에 보이는 새로운 마커를 향해 이동하는 탐험 로직 적용.
+    * "마커 발견 → 접근 → 완료 처리 → 회전하여 다음 마커 탐색"의 상태 머신(FSM) 구조.
+* **Continuous Smooth Pursuit:**
+    * 가다 서다(Stop & Go) 방식을 폐기하고, 마커와의 거리에 따라 속도를 가변적으로 조절하는 연속 PID 제어 적용 (Motion Blur 최소화).
+
+### 2.3 매핑 및 위치 추정 (SLAM & Mapping)
+* **Marker-based Pose Estimation:**
+    * ArUco 마커의 실제 크기 정보를 이용하여 카메라와 마커 사이의 정확한 3차원 거리 및 자세(Pose) 산출.
+    * 이를 Ground Truth로 삼아 드론의 이동 궤적(Trajectory) 보정.
+* **Sparse Point Cloud Mapping:**
+    * 마커의 위치를 노드(Node)로 하는 위상 지도(Topological Map)와 ORB 특징점을 융합한 희소 지도 작성.
 
 ---
 
 ## 3. 개발 환경 (Development Environment)
-* **Hardware:** DJI Tello (Ryze Tech) - Monocular Camera, IMU
+* **Hardware:** DJI Tello (Ryze Tech)
 * **Language:** Python 3.x
 * **Libraries:**
-    * `OpenCV` (Computer Vision & Geometry)
-    * `djitellopy` (Drone Control SDK)
-    * `NumPy` (Matrix Calculation)
-    * `Matplotlib` or `Pangolin` (Visualization)
+    * `OpenCV` (cv2, cv2.aruco) - Marker Detection & Pose Estimation
+    * `djitellopy` - Drone Control SDK
+    * `NumPy` - Matrix & Vector Calculation
+    * `Matplotlib` - Real-time Visualization
 
 ---
 
 ## 4. 제약 사항 및 해결 전략 (Constraints & Strategy)
 ### 4.1 스케일 모호성 (Scale Ambiguity)
-* **문제:** 단안 카메라 특성상 절대적인 거리(Scale) 단위(m, cm)를 알 수 없음.
-* **전략:** 초기 구현 단계에서는 **상대적인 스케일(Relative Scale)**로 지도를 작성하고, 추후 Tello의 하단 ToF 센서(높이)나 IMU 데이터를 융합(Sensor Fusion)하여 보정 시도.
+* **문제:** 단안 카메라는 물체의 실제 크기나 거리를 알 수 없음.
+* **해결:** 사전에 크기가 정의된 **ArUco 마커**를 앵커(Anchor)로 사용하여 미터(m) 단위의 절대 거리 확보.
 
-### 4.2 비행 운용 전략
-* **문제:** 제자리 회전(Pure Rotation)만 수행할 경우 깊이 정보를 얻을 수 없음.
-* **전략:** 초기 매핑 시 **좌우/전후 이동(Translation)을 우선**으로 하는 비행 패턴을 적용하여 충분한 시차(Parallax)를 확보.
-* **검증:** 초기에는 **수동 조종(Teleoperation)**으로 안정적인 데이터를 수집하며 알고리즘 검증 후 자율 비행 적용.
+### 4.2 영상 지연 및 모션 블러 (Latency & Blur)
+* **문제:** WiFi 통신 지연 및 드론의 급격한 기동 시 영상이 흐려져 마커 인식이 실패함.
+* **해결:** 1. **스레딩 모델**로 영상 수신 버퍼를 1로 제한하여 지연 제거.
+    2. **PID 제어** 튜닝을 통해 급발진/급정지를 방지하고 부드러운 곡선 주행 유도.
 
 ---
 
@@ -103,5 +117,3 @@
 - 프레임 지연 60-90% 감소 확인 가능 (실측)
 - 안전한 드론 운용 (모델 로드 실패 시 이륙 방지)
 - 성능 비교 결과 시각화 자동화
-
----
