@@ -1,0 +1,67 @@
+# ==========================================
+# Tello Drone Project - Dependencies
+# ==========================================
+# ArUco 마커 기반 실내 자율주행 및 3D 공간 매핑 프로젝트
+# Phase 2: Producer-Consumer 패턴 기반 성능 최적화 완료
+# Phase 3: ArUco SLAM 구현 예정
+#
+# 설치 방법:
+#   pip install -r requirements.txt
+#
+# 가상환경 권장:
+#   python3 -m venv venv
+#   source venv/bin/activate  (Linux/Mac)
+#   venv\Scripts\activate     (Windows)
+# ==========================================
+
+# ==========================================
+# 드론 제어
+# ==========================================
+djitellopy>=2.4.0
+
+# ==========================================
+# 컴퓨터 비전 및 이미지 처리
+# ==========================================
+# opencv-contrib-python: ArUco 마커 검출을 위해 필수
+# opencv-python 대신 opencv-contrib-python 사용 필수!
+opencv-contrib-python>=4.8.0
+
+# ==========================================
+# AI/ML - 객체 검출
+# ==========================================
+# YOLOv8 (ultralytics 패키지)
+ultralytics>=8.0.0
+
+# NumPy (OpenCV, YOLO 등의 의존성)
+numpy>=1.24.0
+
+# ==========================================
+# 데이터 분석 및 시각화
+# ==========================================
+# 성능 분석 도구용 (analyze_performance.py)
+pandas>=2.0.0
+matplotlib>=3.7.0
+
+# ==========================================
+# PDF 생성
+# ==========================================
+# ArUco 마커 및 캘리브레이션 체스보드 생성용
+fpdf>=1.7.2
+
+# ==========================================
+# 추가 정보
+# ==========================================
+# Python 버전: 3.8 이상 권장 (3.10 최적)
+#
+# 시스템 의존성 (Linux):
+#   sudo apt-get install libgl1-mesa-glx libglib2.0-0 libxvidcore-dev
+#
+# GPU 가속 (선택사항):
+#   - CUDA 및 cuDNN 설치 필요
+#   - ultralytics가 자동으로 GPU 감지
+#
+# 문제 해결:
+#   - OpenCV 에러: opencv-python 제거 후 opencv-contrib-python만 설치
+#   - YOLO 모델: 첫 실행 시 yolov8n.pt 자동 다운로드 (인터넷 필요)
+#   - XVID 코덱: Linux의 경우 libxvidcore-dev 설치 필요
+# ==========================================

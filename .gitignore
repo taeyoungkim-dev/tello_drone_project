@@ -1,4 +1,112 @@
-.vscode
+# ==========================================
+# Python
+# ==========================================
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
 venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# ==========================================
+# IDE / Editor
+# ==========================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ==========================================
+# Project-specific: Generated Data
+# ==========================================
+# 비디오 파일
+videos/
+*.avi
+*.mp4
+*.mov
+
+# 캘리브레이션 이미지
+calibration_images/
+*.npz
+
+# 생성된 PDF (마커 및 체스보드)
+markers/*.pdf
+calibration/*.pdf
+
+# ==========================================
+# AI/ML Models
+# ==========================================
+# YOLO 모델 파일 (자동 다운로드되므로 제외)
+*.pt
+*.pth
+*.onnx
+
+# Ultralytics 결과 폴더
 runs/
-yolov8n.pt
+
+# ==========================================
+# OS-specific
+# ==========================================
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+.directory
+
+# ==========================================
+# Jupyter Notebook
+# ==========================================
+.ipynb_checkpoints
+
+# ==========================================
+# 기타
+# ==========================================
+# 임시 파일
+*.tmp
+*.bak
+*.swp
+temp/
+tmp/
+
+# 환경 변수 파일 (민감 정보 포함 가능)
+.env
+.env.local
