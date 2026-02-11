@@ -96,6 +96,7 @@ def plot_performance_comparison(logs, pairs, save_path='performance_comparison.p
         old_fps_mean = df_old['FPS'].mean()
         new_fps_mean = df_new['FPS'].mean()
         fps_improvement = ((new_fps_mean - old_fps_mean) / old_fps_mean) * 100
+        old_latency_mean = df_old['Latency_ms'].mean()
         new_latency_mean = df_new['Latency_ms'].mean()
         
         # 서브플롯 생성 (1행 3열)
@@ -134,25 +135,49 @@ def plot_performance_comparison(logs, pairs, save_path='performance_comparison.p
                 bbox=dict(boxstyle='round,pad=0.5', facecolor='yellow', alpha=0.3))
         ax2.grid(True, alpha=0.3, axis='y')
         
-        # 3. Frame Latency (최적화 후만)
+        # 3. Frame Latency 비교 (Original vs Optimized)
         ax3 = plt.subplot(n_pairs, 3, base_idx + 2)
-        ax3.plot(df_new['Time_s'], df_new['Latency_ms'], 'g-', alpha=0.7, linewidth=1.5)
-        ax3.axhline(new_latency_mean, color='darkgreen', linestyle='--', linewidth=2, 
-                   label=f'Average: {new_latency_mean:.1f}ms')
-        ax3.set_title(f'{name} - Frame Latency (Optimized)', fontsize=12, fontweight='bold')
+        
+        # Original Latency (대부분 0일 것임)
+        ax3.plot(df_old['Time_s'], df_old['Latency_ms'], 'r-', alpha=0.6, linewidth=1, 
+                label=f'Original (Avg: {old_latency_mean:.1f}ms)')
+        
+        # Optimized Latency
+        ax3.plot(df_new['Time_s'], df_new['Latency_ms'], 'g-', alpha=0.7, linewidth=1.5, 
+                label=f'Optimized (Avg: {new_latency_mean:.1f}ms)')
+        
+        # 평균선 표시
+        if old_latency_mean > 0:
+            ax3.axhline(old_latency_mean, color='red', linestyle='--', alpha=0.7, linewidth=2)
+        ax3.axhline(new_latency_mean, color='darkgreen', linestyle='--', linewidth=2)
+        
+        ax3.set_title(f'{name} - Frame Latency Comparison', fontsize=12, fontweight='bold')
         ax3.set_xlabel('Time (seconds)', fontsize=10)
         ax3.set_ylabel('Latency (ms)', fontsize=10)
         ax3.legend(loc='upper right')
         ax3.grid(True, alpha=0.3)
         
+        # Original이 0이면 주석 추가
+        if old_latency_mean < 1:
+            ax3.text(0.5, 0.95, 'Note: Original has no latency measurement',
+                    transform=ax3.transAxes, ha='center', va='top',
+                    fontsize=9, style='italic', color='red',
+                    bbox=dict(boxstyle='round,pad=0.5', facecolor='white', alpha=0.7))
+        
         # 통계 출력
         print(f"\n{'='*60}")
         print(f"{name} Performance Analysis")
         print(f"{'='*60}")
-        print(f"Original Average FPS:    {old_fps_mean:>8.2f}")
-        print(f"Optimized Average FPS:   {new_fps_mean:>8.2f}")
-        print(f"FPS Improvement:         {fps_improvement:>7.1f}%")
-        print(f"Frame Latency (Optimized): {new_latency_mean:>6.2f}ms")
+        print(f"Original Average FPS:      {old_fps_mean:>8.2f}")
+        print(f"Optimized Average FPS:     {new_fps_mean:>8.2f}")
+        print(f"FPS Improvement:           {fps_improvement:>7.1f}%")
+        print(f"Original Frame Latency:    {old_latency_mean:>6.2f}ms")
+        print(f"Optimized Frame Latency:   {new_latency_mean:>6.2f}ms")
+        if old_latency_mean > 0:
+            latency_reduction = ((old_latency_mean - new_latency_mean) / old_latency_mean) * 100
+            print(f"Latency Reduction:         {latency_reduction:>7.1f}%")
+        else:
+            print(f"Latency Reduction:         N/A (Original not measured)")
         print(f"{'='*60}")
     
     plt.tight_layout()

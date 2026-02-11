@@ -254,19 +254,29 @@ try:
         except queue.Empty:
             continue
 
+        # ==========================================
+        # [성능 측정 개선] 처리 시작 시간 기록
+        # ==========================================
+        processing_start_time = time.time()
+        
         # 얼굴 찾기 & 제어 (로직 동일)
         img, info = findFace(img)
         pError = trackFace(info, w, pid, pError)
         
         # ==========================================
-        # [성능 측정 추가] FPS 및 Frame Latency 계산
+        # [성능 측정 개선] FPS 및 Frame Latency 계산
         # ==========================================
         cTime = time.time()
-        fps = 1 / (cTime - pTime) if (cTime - pTime) > 0 else 0
-        pTime = cTime
         
-        # Frame Latency 계산 (ms 단위)
-        frame_latency = (cTime - frame_timestamp) * 1000
+        # 순수 처리 시간 기반 FPS (큐 대기 시간 제외)
+        processing_time = cTime - processing_start_time
+        fps = 1 / processing_time if processing_time > 0 else 0
+        
+        # Frame Latency: 프레임 수신 시점부터 처리 시작까지의 지연 (ms 단위)
+        # 이는 프레임이 큐에서 대기한 시간을 나타냄
+        frame_latency = (processing_start_time - frame_timestamp) * 1000
+        
+        pTime = cTime
         
         # 화면에 성능 지표 표시
         cv2.putText(img, f"Loop FPS: {int(fps)}", (10, h - 70), 
