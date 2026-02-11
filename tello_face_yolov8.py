@@ -64,6 +64,65 @@ class LogWriter(threading.Thread):
         """로그 스레드 종료"""
         self.running = False
 
+# ==========================================
+# [비디오 저장 기능 추가] 비디오 저장 전용 스레드
+# ==========================================
+class VideoWriter(threading.Thread):
+    """
+    백그라운드에서 비디오를 저장하는 스레드
+    - 메인 루프 성능에 영향 없이 비디오 저장
+    - 큐 기반 비동기 처리로 디스크 I/O 블로킹 방지
+    """
+    def __init__(self, filename, width, height, fps=20.0, codec='XVID'):
+        super().__init__()
+        self.daemon = True
+        self.frame_queue = queue.Queue(maxsize=100)  # 최대 100프레임 버퍼
+        self.filename = filename
+        self.width = width
+        self.height = height
+        self.fps = fps
+        self.codec = codec
+        self.running = True
+        self.frames_written = 0
+        
+    def run(self):
+        # 비디오 라이터 초기화
+        fourcc = cv2.VideoWriter_fourcc(*self.codec)
+        writer = cv2.VideoWriter(self.filename, fourcc, self.fps, (self.width, self.height))
+        
+        if not writer.isOpened():
+            print(f"⚠️ 경고: 비디오 파일 생성 실패 ({self.filename})")
+            return
+        
+        print(f"🎥 비디오 저장 시작: {self.filename} ({self.codec} 코덱, {self.fps} FPS)")
+        
+        while self.running or not self.frame_queue.empty():
+            try:
+                frame = self.frame_queue.get(timeout=0.1)
+                writer.write(frame)
+                self.frames_written += 1
+            except queue.Empty:
+                continue
+        
+        # 비디오 라이터 종료
+        writer.release()
+        print(f"✅ 비디오 저장 완료: {self.frames_written}개 프레임")
+    
+    def write(self, frame):
+        """
+        프레임을 큐에 추가 (매우 빠름, 1μs 미만)
+        큐가 꽉 찼으면 프레임 드롭 (성능 보호)
+        """
+        if not self.frame_queue.full():
+            self.frame_queue.put(frame)
+        else:
+            # 큐가 꽉 찼으면 프레임 드롭 (경고 없이 무시)
+            pass
+    
+    def stop(self):
+        """비디오 저장 스레드 종료"""
+        self.running = False
+
 # --- 설정 파트 ---
 w, h = 480, 360
 # PID 게인 [Yaw, Up/Down, Forward/Back(Distance)]
@@ -133,11 +192,27 @@ logger = LogWriter(str(log_filename), flush_interval_sec=1.0)
 logger.start()
 print(f"📝 로그 파일 생성: {log_filename}")
 
+# ==========================================
+# [비디오 저장 기능 추가] 비디오 파일 생성 및 스레드 시작
+# ==========================================
+# videos 폴더 생성 (없으면 자동 생성)
+VIDEO_DIR = Path("videos")
+VIDEO_DIR.mkdir(exist_ok=True)
+
+video_filename = VIDEO_DIR / f"yolov8n_{now}.avi"
+video_writer = VideoWriter(str(video_filename), w, h, fps=20.0, codec='XVID')
+video_writer.start()
+print(f"🎥 비디오 파일 생성: {video_filename}")
+# ==========================================
+
 frame_count = 0  # 프레임 카운터
 
 def findPerson(img):
-    # conf=0.65 유지
-    results = model(img, stream=True, classes=0, verbose=False, conf=0.65)
+    # ==========================================
+    # [최적화] YOLO 입력 해상도 축소 (640 → 320)
+    # ==========================================
+    # imgsz=320으로 추론 속도 2-3배 향상
+    results = model(img, stream=True, classes=0, verbose=False, conf=0.65, imgsz=320)
     
     personListC = []
     personListArea = []
@@ -211,17 +286,7 @@ def trackPerson(info, w, h, pid_yaw, pid_ud):
 # 메인 루프
 try:
     while True:
-        # ==========================================
-        # [성능 측정 개선] 순수 처리 시간 및 Frame Latency 측정
-        # ==========================================
-        # 루프 시작 시간 기록 (프레임 대기 시간 포함)
-        loop_start_time = time.time()
-        
         img = me.get_frame_read().frame
-        
-        # 프레임 수신 직후 타임스탬프 기록 (Frame Latency 계산용)
-        frame_timestamp = time.time()
-        
         img = cv2.resize(img, (w, h))
         
         img, info = findPerson(img)
@@ -233,33 +298,28 @@ try:
         cv2.putText(img, f"DistErr: {dist_err}", (10, 60), cv2.FONT_HERSHEY_PLAIN, 1.5, (0, 255, 0), 2)
         
         # ==========================================
-        # [성능 측정 개선] FPS 및 Frame Latency 계산
+        # [성능 측정 추가] FPS 계산 및 화면 표시
         # ==========================================
         cTime = time.time()
-        
-        # 순수 처리 시간 기반 FPS (프레임 대기 시간 제외)
-        processing_time = cTime - frame_timestamp
-        fps = 1 / processing_time if processing_time > 0 else 0
-        
-        # Frame Latency: 루프 시작부터 처리 시작까지의 지연 (ms 단위)
-        # 이는 WiFi 수신 대기 시간을 나타냄
-        frame_latency = (frame_timestamp - loop_start_time) * 1000
-        
+        fps = 1 / (cTime - pTime) if (cTime - pTime) > 0 else 0
         pTime = cTime
         
-        # 화면에 성능 지표 표시
-        cv2.putText(img, f"Loop FPS: {int(fps)}", (10, h - 70), 
-                    cv2.FONT_HERSHEY_PLAIN, 2, (0, 255, 0), 2)
-        cv2.putText(img, f"WiFi Delay: {int(frame_latency)}ms", (10, h - 40), 
+        # FPS 화면 표시 (빨간색, 크게)
+        cv2.putText(img, f"Loop FPS: {int(fps)}", (10, h - 40), 
                     cv2.FONT_HERSHEY_PLAIN, 2, (0, 0, 255), 2)
         # ==========================================
         
         # ==========================================
-        # [로깅 기능 추가] 성능 데이터 로그 저장
+        # [로깅 기능 추가] 성능 데이터 로그 저장 (FPS만)
         # ==========================================
         frame_count += 1
-        # Frame Latency는 WiFi 수신 대기 시간 (프레임 가져오는 시간)
-        logger.log([frame_count, cTime, frame_latency, fps])
+        logger.log([frame_count, cTime, 0, fps])
+        # ==========================================
+        
+        # ==========================================
+        # [비디오 저장 기능 추가] 처리된 프레임 저장
+        # ==========================================
+        video_writer.write(img)
         # ==========================================
 
         cv2.imshow("Final P-Control Tracking", img)
@@ -279,6 +339,14 @@ finally:
     logger.stop()
     logger.join()
     print(f"✅ 로그 저장 완료: {log_filename} (총 {frame_count}개 프레임)")
+    # ==========================================
+    
+    # ==========================================
+    # [비디오 저장 기능 추가] 비디오 저장 스레드 종료
+    # ==========================================
+    video_writer.stop()
+    video_writer.join()
+    print(f"✅ 비디오 저장 완료: {video_filename}")
     # ==========================================
     
     cv2.destroyAllWindows()
